@@ -1,9 +1,10 @@
 import os
 import re
+import json
 import asyncio
 import difflib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 from telegram import (
@@ -26,10 +27,22 @@ from telegram.ext import (
 
 import database as db
 
+try:
+    from anthropic import AsyncAnthropic
+except ImportError:
+    AsyncAnthropic = None
+
 # ----------------- Sozlamalar -----------------
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
+ai_client = None
+if AsyncAnthropic and ANTHROPIC_API_KEY:
+    ai_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+
+AI_MODEL = "claude-haiku-4-5-20251001"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -47,6 +60,7 @@ SELLER_NAME, SELLER_PHONE, SELLER_REGION, SELLER_HAS_VEHICLE, SELLER_VEHICLE_TYP
 # Sotuvchi mahsulot qo'shish bosqichlari
 SP_NAME, SP_TYPE, SP_PRICE, SP_QUANTITY, SP_DESC, SP_PHOTO, SP_ADDRESS, SP_LOCATION, SP_REGIONS, SP_TUMANS = range(200, 210)
 SP_FREE_TEXT = 210
+AI_QA_WAITING = 211
 
 # Haydovchi ro'yxatdan o'tish bosqichlari
 DRV_NAME, DRV_PHONE, DRV_VEHICLE, DRV_NUMBER, DRV_CAPACITY, DRV_REGION, DRV_TUMAN, DRV_LOCATION = range(300, 308)
@@ -241,6 +255,7 @@ def main_menu_keyboard():
             [KeyboardButton("📦 Qopli silos")],
             [KeyboardButton("📝 Ro'yxatdan o'tish")],
             [KeyboardButton("📊 Mening jadvalim")],
+            [KeyboardButton("❓ Savol-javob")],
             [KeyboardButton("☎️ Aloqa"), KeyboardButton("🎁 Do'stni taklif qilish")],
             [KeyboardButton("🌱 Urug'lar"), KeyboardButton("💊 Vetapteka")],
             [KeyboardButton("🧪 Mineral o'g'itlar"), KeyboardButton("🚜 Kombaynlar")],
@@ -955,6 +970,100 @@ def parse_free_listing_text(text):
     return result
 
 
+async def ai_parse_listing_text(text):
+    """Erkin matndan (fermer yozgan e'lon xabaridan) miqdor, birlik, narx, telefon va manzilni
+    Claude yordamida ajratib oladi. Oddiy regex-parser (parse_free_listing_text) tushuna olmagan
+    holatlarda (masalan so'zlashuv uslubida yozilgan, imlo xatolari ko'p bo'lgan matnlarda)
+    ishlatiladi. AI ulanmagan bo'lsa (kalit yo'q), None qaytaradi."""
+    if not ai_client:
+        return None
+    try:
+        response = await ai_client.messages.create(
+            model=AI_MODEL,
+            max_tokens=300,
+            system=(
+                "Sen O'zbek tilida yozilgan fermer/sotuvchi e'lonlarini tahlil qiluvchi yordamchisan. "
+                "Foydalanuvchi matnidan quyidagi maydonlarni FAQAT JSON formatida qaytar, hech qanday "
+                "boshqa matn, izoh yoki tushuntirish yozma:\n"
+                '{"quantity": <son yoki null>, "unit": "gektar" yoki "kg" yoki "dona" yoki null, '
+                '"price": <son (so\'mda) yoki null>, "phone": "+998XXXXXXXXX" yoki null, '
+                '"address": "<manzil matni, agar bo\'lsa>"}\n'
+                "Agar biror maydonni matndan topa olmasang, null qo'y. Sonlarni raqam sifatida qaytar, "
+                "matn sifatida emas."
+            ),
+            messages=[{"role": "user", "content": text}]
+        )
+        raw = response.content[0].text.strip()
+        raw = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.M).strip()
+        parsed = json.loads(raw)
+        return {
+            "quantity": parsed.get("quantity"),
+            "unit": parsed.get("unit"),
+            "price": parsed.get("price"),
+            "phone": parsed.get("phone"),
+            "address": parsed.get("address") or "",
+        }
+    except Exception as e:
+        logger.error(f"AI matn tahlilida xatolik: {e}")
+        return None
+
+
+async def ask_ai_question(question):
+    """Mijoz/foydalanuvchi savoliga botning ishlashi haqidagi kontekst asosida javob beradi."""
+    if not ai_client:
+        return (
+            "Kechirasiz, hozircha AI yordamchi ulanmagan. "
+            "Savolingiz bo'yicha \"☎️ Aloqa\" bo'limi orqali murojaat qiling."
+        )
+    try:
+        response = await ai_client.messages.create(
+            model=AI_MODEL,
+            max_tokens=500,
+            system=(
+                "Sen 'Yem-Xashak' nomli O'zbekiston bo'ylab ishlaydigan Telegram botning yordamchisisan. "
+                "Bu bot orqali fermerlar silos/somon/beda sotadi, haydovchilar yukni tashiydi va qayta "
+                "sotadi, do'kon/sotuvchilar qopli mahsulot sotadi. Botning asosiy bo'limlari: "
+                "'🌾 Fermerlar ulgurji (naval)' — fermer yerini ko'rish, faqat ma'lumot, telefon orqali "
+                "bog'lanish; '🚛 Mashinada sotiladi' — haydovchining tayyor silosini bot orqali xarid "
+                "qilish; '📦 Qopli silos' — do'kon/sotuvchidan qopli mahsulot bot orqali xarid qilish; "
+                "'📝 Ro'yxatdan o'tish' — fermer/haydovchi/sotuvchi/kombayn egasi sifatida ro'yxatdan "
+                "o'tish; '📢 E'lon berish' — o'z e'loningizni joylashtirish; '📊 Mening jadvalim' — "
+                "fermer uchun haydovchilar bilan hisob-kitob jadvali. Foydalanuvchi savoliga O'zbek "
+                "tilida, qisqa va aniq javob ber. Agar savol botga aloqasi bo'lmasa yoki javobni bilmasang, "
+                "buni ochiq ayt va \"☎️ Aloqa\" bo'limiga murojaat qilishni tavsiya qil."
+            ),
+            messages=[{"role": "user", "content": question}]
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        logger.error(f"AI savol-javobda xatolik: {e}")
+        return "Kechirasiz, hozir javob bera olmadim. Birozdan so'ng qayta urinib ko'ring."
+
+
+async def ai_qa_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not ai_client:
+        await update.message.reply_text(
+            "Kechirasiz, hozircha AI yordamchi ulanmagan. "
+            "\"☎️ Aloqa\" bo'limi orqali murojaat qiling.",
+            reply_markup=main_menu_keyboard()
+        )
+        return ConversationHandler.END
+    await update.message.reply_text(
+        "❓ Savolingizni yozing — bot qanday ishlashi, buyurtma berish, ro'yxatdan o'tish va h.k. "
+        "haqida savol berishingiz mumkin:",
+        reply_markup=cancel_keyboard()
+    )
+    return AI_QA_WAITING
+
+
+async def ai_qa_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    question = update.message.text
+    await update.message.reply_text("⏳ Javob tayyorlanmoqda...")
+    answer = await ask_ai_question(question)
+    await update.message.reply_text(answer, reply_markup=main_menu_keyboard())
+    return ConversationHandler.END
+
+
 async def sp_enter_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["sp"] = {"name": update.message.text}
 
@@ -1061,7 +1170,14 @@ async def sp_enter_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def sp_free_text_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    parsed = parse_free_listing_text(update.message.text)
+    text = update.message.text
+    parsed = parse_free_listing_text(text)
+
+    if not parsed["quantity"] or not parsed["price"]:
+        ai_parsed = await ai_parse_listing_text(text)
+        if ai_parsed and ai_parsed.get("quantity") and ai_parsed.get("price"):
+            parsed = ai_parsed
+
     if not parsed["quantity"] or not parsed["price"]:
         await update.message.reply_text(
             "Tushunolmadim — iltimos, gektar va narxni ham kiriting.\n\n"
@@ -1078,8 +1194,22 @@ async def sp_free_text_value(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if parsed["phone"]:
         db.update_seller_phone(context.user_data["seller_id"], parsed["phone"])
 
-    await sp_finalize(context, update.effective_user.id, update.effective_chat.id)
-    return ConversationHandler.END
+    location_kb = ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("📍 Joylashuvni yuborish", request_location=True)],
+            ["🗺 Hududlarni o'zim tanlayman"],
+            ["⏭ O'tkazib yuborish"],
+        ],
+        resize_keyboard=True
+    )
+    await update.message.reply_text(
+        "Xabar qayerdagi haydovchilarga borishini belgilang:\n\n"
+        "📍 Joylashuvni yuborish — faqat 25-30 km atrofdagilarga\n"
+        "🗺 Hududlarni o'zim tanlayman — o'zingiz istagan tuman/viloyatlarga\n"
+        "⏭ O'tkazib yuborish — bot manzilingizdan avtomatik tuman/viloyatni aniqlab yuboradi",
+        reply_markup=location_kb
+    )
+    return SP_LOCATION
 
 
 
@@ -1869,10 +1999,10 @@ async def show_driver_silos_results(send_target, context: ContextTypes.DEFAULT_T
 
     scope_note = f"({region})" if region else "(respublika bo'ylab)"
     await send_target.reply_text(
-        f"🚛 Mashinada sotiladi {scope_note} — eng arzonidan boshlab. "
+        f"🚛 Mashinada sotiladi {scope_note} — eng yangi e'londan boshlab. "
         "O'zingizga yoqqan haydovchidan buyurtma berishingiz mumkin:"
     )
-    for lst_id, driver_id, price, qty, photo_id, address, lst_region, drv_name, drv_phone, veh_num, description in listings:
+    for lst_id, driver_id, price, qty, photo_id, address, lst_region, drv_name, drv_phone, veh_num, description, created_at in listings:
         sifat_line = f"\nSifati: {description}" if description else ""
         caption = (
             f"🚛 <b>Silos</b> — {fmt_money(price)} so'm/kg\n"
@@ -1935,10 +2065,10 @@ async def show_qopli_results(send_target, context: ContextTypes.DEFAULT_TYPE, re
 
     scope_note = f"({region})" if region else "(respublika bo'ylab)"
     await send_target.reply_text(
-        f"📦 Qopli silos {scope_note} — eng arzonidan boshlab. "
+        f"📦 Qopli silos {scope_note} — eng yangi e'londan boshlab. "
         "O'zingizga yoqqan sotuvchidan buyurtma berishingiz mumkin:"
     )
-    for sp_id, seller_id, tg_id, shop_name, name, unit, price, qty, lst_region, address, photo_id, phone, description in listings:
+    for sp_id, seller_id, tg_id, shop_name, name, unit, price, qty, lst_region, address, photo_id, phone, description, created_at in listings:
         sifat_line = f"\nSifati: {description}" if description else ""
         caption = (
             f"📦 <b>{name}</b> — {fmt_money(price)} so'm/{unit}\n"
@@ -2004,26 +2134,26 @@ async def show_loads_results(send_target, context: ContextTypes.DEFAULT_TYPE, us
         return
 
     combined = []
-    for sp_id, shop_name, phone, lst_region, product_name, unit, price, qty, address, package_type, photo_id, description in loads:
+    for sp_id, shop_name, phone, lst_region, product_name, unit, price, qty, address, package_type, photo_id, description, created_at in loads:
         price_unit = "kg" if package_type == "gektar" else unit
         combined.append({
-            "source": "farmer", "sort_price": price, "sp_id": sp_id, "shop_name": shop_name,
+            "source": "farmer", "created_at": created_at or "", "sp_id": sp_id, "shop_name": shop_name,
             "phone": phone, "region": lst_region, "product_name": product_name, "unit": unit,
             "price": price, "price_unit": price_unit, "qty": qty, "address": address,
             "package_type": package_type, "photo_id": photo_id, "description": description,
         })
-    for lst_id, price, qty, photo_id, address, lst_region, owner_id, owner_name, owner_phone, description in combine_silos:
+    for lst_id, price, qty, photo_id, address, lst_region, owner_id, owner_name, owner_phone, description, created_at in combine_silos:
         combined.append({
-            "source": "combine", "sort_price": price, "price": price, "qty": qty,
+            "source": "combine", "created_at": created_at or "", "price": price, "qty": qty,
             "photo_id": photo_id, "address": address, "region": lst_region,
             "owner_name": owner_name, "owner_phone": owner_phone, "description": description,
         })
 
-    combined.sort(key=lambda x: x["sort_price"])
+    combined.sort(key=lambda x: x["created_at"], reverse=True)
 
     scope_note = f"({region})" if region else "(respublika bo'ylab)"
     await send_target.reply_text(
-        f"🌾 Fermerlar ulgurji {scope_note} — eng arzonidan boshlab, narxi, rasmi va manziliga qarab tanlang:"
+        f"🌾 Fermerlar ulgurji {scope_note} — eng yangi e'londan boshlab, narxi, rasmi va manziliga qarab tanlang:"
     )
 
     for item in combined:
@@ -2698,9 +2828,68 @@ async def delete_combine_silos_callback(update: Update, context: ContextTypes.DE
     await query.edit_message_text("🗑 E'lon admin tomonidan o'chirildi.")
 
 
+async def admin_ai_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/hisobot — faqat admin uchun: oxirgi 7 kunlik statistikani AI yordamida
+    o'zbek tilida tushunarli hisobotga aylantirib beradi."""
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("Bu buyruq faqat admin uchun.")
+        return
+
+    await update.message.reply_text("⏳ Hisobot tayyorlanmoqda...")
+    stats = db.get_weekly_stats(days=7)
+
+    if not ai_client:
+        text = (
+            "🤖 AI ulanmagan — xom statistika:\n\n"
+            f"Buyurtmalar: {stats['orders_count']} ta, jami {fmt_money(stats['orders_total_sum'])} so'm\n"
+            f"Yangi fermer/sotuvchilar: {stats['new_sellers']}\n"
+            f"Yangi haydovchilar: {stats['new_drivers']}\n"
+            f"Yangi fermer e'lonlari: {stats['new_seller_listings']}\n"
+            f"Yangi haydovchi silos e'lonlari: {stats['new_driver_silos_listings']}\n"
+            f"To'lanmagan qarzlar soni: {stats['unpaid_debts_count']}\n"
+            f"Eng faol viloyatlar (buyurtma bo'yicha): {stats['top_order_regions']}\n"
+            f"Viloyat bo'yicha o'rtacha narx: {stats['avg_price_by_region']}"
+        )
+        await update.message.reply_text(text)
+        return
+
+    stats_text = (
+        f"Oxirgi 7 kunlik xom statistika (Yem-Xashak boti):\n"
+        f"- Buyurtmalar soni: {stats['orders_count']}, jami summa: {stats['orders_total_sum']} so'm\n"
+        f"- Eng faol viloyatlar (buyurtma soni bo'yicha): {stats['top_order_regions']}\n"
+        f"- Yangi ro'yxatdan o'tgan fermer/sotuvchilar: {stats['new_sellers']}\n"
+        f"- Yangi ro'yxatdan o'tgan haydovchilar: {stats['new_drivers']}\n"
+        f"- Yangi fermer/sotuvchi e'lonlari: {stats['new_seller_listings']}\n"
+        f"- Yangi haydovchi silos e'lonlari: {stats['new_driver_silos_listings']}\n"
+        f"- Viloyat bo'yicha o'rtacha silos narxi (so'm/kg): {stats['avg_price_by_region']}\n"
+        f"- Hozirgi to'lanmagan (kechikkan) qarzlar soni: {stats['unpaid_debts_count']}"
+    )
+
+    try:
+        response = await ai_client.messages.create(
+            model=AI_MODEL,
+            max_tokens=700,
+            system=(
+                "Sen 'Yem-Xashak' Telegram botining administratori uchun ishlaydigan tahlilchisan. "
+                "Senga xom statistika beriladi — shu asosida o'zbek tilida, qisqa va tushunarli "
+                "haftalik hisobot yoz. Muhim tendensiyalarni, e'tibor talab qiladigan narsalarni "
+                "(masalan to'lanmagan qarzlar ko'p bo'lsa) alohida ta'kidla. Hisobotni oddiy "
+                "sarlavhalar va emoji bilan tuzilgan holda, lekin qisqa (300-400 so'zdan oshmasin) yoz. "
+                "Faqat berilgan raqamlar asosida yoz, o'zingdan raqam qo'shma."
+            ),
+            messages=[{"role": "user", "content": stats_text}]
+        )
+        report = response.content[0].text.strip()
+        await update.message.reply_text(f"📊 <b>Haftalik hisobot (AI)</b>\n\n{report}", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"AI hisobot yaratishda xatolik: {e}")
+        await update.message.reply_text("Kechirasiz, hisobot yaratib bo'lmadi. Birozdan so'ng qayta urinib ko'ring.")
+
+
 async def admin_listings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/elonlar — faqat admin uchun: barcha faol e'lonlarni korsatadi, har biriga ochirish tugmasi bilan"""
     if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("Bu buyruq faqat admin uchun.")
         return
 
     sp_rows = db.get_available_farmer_loads()
@@ -2715,7 +2904,7 @@ async def admin_listings(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"🗑 <b>Barcha faol e'lonlar ({total} ta):</b>", parse_mode="HTML")
 
-    for sp_id, shop_name, phone, region, product_name, unit, price, qty, address, package_type, photo_id, description in sp_rows:
+    for sp_id, shop_name, phone, region, product_name, unit, price, qty, address, package_type, photo_id, description, created_at in sp_rows:
         text = (
             f"🌾 [Fermer] {product_name} — {fmt_money(qty)} {unit}, {fmt_money(price)} so'm/{unit}\n"
             f"{shop_name} | {phone} | {region}, {address}"
@@ -2723,7 +2912,7 @@ async def admin_listings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 O'chirish", callback_data=f"del_sp:{sp_id}")]])
         await update.message.reply_text(text, reply_markup=kb)
 
-    for lst_id, driver_id, price, qty, photo_id, address, region, drv_name, drv_phone, veh_num, description in ds_rows:
+    for lst_id, driver_id, price, qty, photo_id, address, region, drv_name, drv_phone, veh_num, description, created_at in ds_rows:
         text = (
             f"🚛 [Haydovchi] Silos — {fmt_money(qty)} kg, {fmt_money(price)} so'm/kg\n"
             f"{drv_name} ({veh_num}) | {drv_phone} | {region}, {address}"
@@ -2731,7 +2920,7 @@ async def admin_listings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 O'chirish", callback_data=f"del_ds:{lst_id}")]])
         await update.message.reply_text(text, reply_markup=kb)
 
-    for lst_id, price, qty, photo_id, address, region, owner_id, owner_name, owner_phone, description in cs_rows:
+    for lst_id, price, qty, photo_id, address, region, owner_id, owner_name, owner_phone, description, created_at in cs_rows:
         qty_note = f"{qty} gektar" if qty is not None else "miqdor noma'lum"
         text = (
             f"🚜 [Kombayn silos] — {qty_note}, {fmt_money(price)} so'm/kg\n"
@@ -2740,7 +2929,7 @@ async def admin_listings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗑 O'chirish", callback_data=f"del_csl:{lst_id}")]])
         await update.message.reply_text(text, reply_markup=kb)
 
-    for lst_id, model, price, photo_id, address, region, owner_name, owner_phone, coverage in cl_rows:
+    for lst_id, model, price, photo_id, address, region, owner_name, owner_phone, coverage, created_at in cl_rows:
         text = (
             f"🚜 [Kombayn texnika] {model} — {fmt_money(price)} so'm/gektar\n"
             f"{owner_name} | {owner_phone} | {region}, {address}"
@@ -2882,9 +3071,9 @@ async def browse_combines(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "🚜 Barcha faol kombaynlar — eng arzon narxidan boshlab:"
+        "🚜 Barcha faol kombaynlar — eng yangi e'londan boshlab:"
     )
-    for lst_id, model, price, photo_id, address, region, owner_name, owner_phone, coverage in listings:
+    for lst_id, model, price, photo_id, address, region, owner_name, owner_phone, coverage, created_at in listings:
         coverage_label = "🇺🇿 Respublika bo'ylab" if coverage == "respublika" else "🏞 Vodiy bo'ylab"
         caption = (
             f"<b>{model}</b>\n"
@@ -3865,17 +4054,18 @@ async def admin_unpaid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ----------------- Botni ishga tushirish -----------------
 
 async def run_cleanup_once(bot):
-    """Bitta safar tozalashni bajaradi va agar biror narsa ochirilgan bolsa, adminga xabar beradi."""
-    counts = db.cleanup_old_listings(days=2)
+    """Bitta safar kunlik tozalashni bajaradi va agar biror narsa ochirilgan bolsa, adminga xabar beradi."""
+    counts = db.cleanup_listings_daily()
     total = sum(counts.values())
     if total > 0:
-        logger.info(f"Avtomatik tozalash: {total} ta eski e'lon o'chirildi ({counts})")
+        logger.info(f"Kunlik tozalash: {total} ta kechagi/eski e'lon o'chirildi ({counts})")
         if ADMIN_CHAT_ID:
             try:
                 await bot.send_message(
                     chat_id=ADMIN_CHAT_ID,
                     text=(
-                        f"🗑 Avtomatik tozalash: {total} ta 2 kundan eski e'lon o'chirildi.\n"
+                        f"🗑 Yangi kun boshlandi — {total} ta eski (kechagi va undan oldingi) e'lon "
+                        f"avtomatik o'chirildi.\n"
                         f"Fermer: {counts['seller_products']}, Haydovchi: {counts['driver_silos']}, "
                         f"Kombayn texnika: {counts['combine_tech']}, Kombayn silos: {counts['combine_silos']}"
                     )
@@ -3884,17 +4074,25 @@ async def run_cleanup_once(bot):
                 logger.error(f"Adminga tozalash xabarini yuborishda xatolik: {e}")
 
 
+def _seconds_until_next_midnight():
+    now = datetime.now()
+    tomorrow_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return (tomorrow_midnight - now).total_seconds()
+
+
 async def periodic_cleanup_loop(app):
     """APScheduler/JobQueue'ga bog'liq bo'lmagan, sof asyncio asosidagi doimiy tsikl —
-    har 24 soatda bir marta ishga tushib, 2 kundan eski e'lonlarni avtomatik o'chiradi.
+    har kuni aynan soat 00:00 da ishga tushib, kechagi va undan oldingi barcha faol
+    e'lonlarni avtomatik o'chiradi (maqsad: e'lonlar har kuni yangilanadi).
     Bu usul hech qanday qo'shimcha kutubxona talab qilmaydi, shu sababli har doim ishlaydi."""
-    await asyncio.sleep(60)  # bot ishga tushgandan 1 daqiqa keyin birinchi tekshiruv
     while True:
+        wait_seconds = _seconds_until_next_midnight()
+        logger.info(f"Kunlik tozalash keyingi safar {wait_seconds/3600:.1f} soatdan keyin (00:00 da) ishga tushadi")
+        await asyncio.sleep(wait_seconds)
         try:
             await run_cleanup_once(app.bot)
         except Exception as e:
-            logger.error(f"Avtomatik tozalash tsiklida xatolik: {e}")
-        await asyncio.sleep(86400)  # keyingi tekshiruv — 24 soatdan keyin
+            logger.error(f"Kunlik tozalash tsiklida xatolik: {e}")
 
 
 async def post_init(app):
@@ -3992,7 +4190,13 @@ def main():
                 MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, sp_enter_address),
             ],
-            SP_LOCATION: [MessageHandler((filters.LOCATION | filters.TEXT) & ~filters.COMMAND, sp_finish)],
+            SP_LOCATION: [
+                MessageHandler(filters.Regex("^📊 Mening jadvalim$"), farmer_weight_exit_to_table),
+                MessageHandler(filters.Regex("^⬅️ Bosh menyu$"), farmer_weight_exit_to_main),
+                MessageHandler(filters.Regex("^📝 Ro'yxatdan o'tish$"), farmer_weight_exit_to_registration),
+                MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel),
+                MessageHandler((filters.LOCATION | filters.TEXT) & ~filters.COMMAND, sp_finish),
+            ],
             SP_REGIONS: [
                 CallbackQueryHandler(handle_viloyat_pick, pattern="^pick_viloyat:"),
                 CallbackQueryHandler(handle_regions_done, pattern="^regions_done$"),
@@ -4233,6 +4437,7 @@ def main():
     app.add_handler(CommandHandler("drivers", admin_drivers))
     app.add_handler(CommandHandler("tolovlar", admin_unpaid))
     app.add_handler(CommandHandler("elonlar", admin_listings))
+    app.add_handler(CommandHandler("hisobot", admin_ai_report))
     app.add_handler(CommandHandler("kombaynlar", admin_combines))
     app.add_handler(order_conv)
     app.add_handler(seller_register_conv)
@@ -4246,6 +4451,21 @@ def main():
     app.add_handler(enter_weight_conv)
     app.add_handler(farmer_weight_conv)
     app.add_handler(ml_conv)
+
+    ai_qa_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^❓ Savol-javob$"), ai_qa_start)],
+        states={
+            AI_QA_WAITING: [
+                MessageHandler(filters.Regex("^📊 Mening jadvalim$"), farmer_weight_exit_to_table),
+                MessageHandler(filters.Regex("^⬅️ Bosh menyu$"), farmer_weight_exit_to_main),
+                MessageHandler(filters.Regex("^📝 Ro'yxatdan o'tish$"), farmer_weight_exit_to_registration),
+                MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ai_qa_answer),
+            ],
+        },
+        fallbacks=[MessageHandler(filters.Regex("^❌ Bekor qilish$"), cancel)],
+    )
+    app.add_handler(ai_qa_conv)
     app.add_handler(manual_weight_conv)
     app.add_handler(MessageHandler(filters.Regex("^✅ Pul oldim \\(belgilash\\)$"), mark_paid_list))
     app.add_handler(CallbackQueryHandler(mark_paid_bot_callback, pattern="^mark_paid_bot:"))

@@ -597,7 +597,7 @@ def find_sellers_by_region_and_product(region, product_name):
 
 def get_active_qopli_listings(region=None):
     """'Qopli silos' bo'limi uchun: barcha faol qopli (respublika bo'ylab yetkaziladigan) e'lonlar,
-    do'kon/sotuvchilar tomonidan qo'yilgan, eng arzonidan boshlab.
+    do'kon/sotuvchilar tomonidan qo'yilgan, eng yangisidan boshlab.
     Agar `region` berilsa, faqat shu viloyatdagi sotuvchilar qaytariladi."""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -605,23 +605,23 @@ def get_active_qopli_listings(region=None):
         cur.execute("""
             SELECT sp.id, s.id, s.telegram_id, s.shop_name, sp.product_name, sp.unit,
                    sp.price, sp.quantity_available, s.region, sp.pickup_address,
-                   sp.photo_file_id, s.phone, sp.description
+                   sp.photo_file_id, s.phone, sp.description, sp.created_at
             FROM seller_products sp
             JOIN sellers s ON s.id = sp.seller_id
             WHERE s.status = 'tasdiqlangan' AND sp.package_type = 'qopli'
                   AND sp.quantity_available > 0 AND sp.claimed = 0 AND s.region = ?
-            ORDER BY sp.price ASC
+            ORDER BY sp.created_at DESC, sp.id DESC
         """, (region,))
     else:
         cur.execute("""
             SELECT sp.id, s.id, s.telegram_id, s.shop_name, sp.product_name, sp.unit,
                    sp.price, sp.quantity_available, s.region, sp.pickup_address,
-                   sp.photo_file_id, s.phone, sp.description
+                   sp.photo_file_id, s.phone, sp.description, sp.created_at
             FROM seller_products sp
             JOIN sellers s ON s.id = sp.seller_id
             WHERE s.status = 'tasdiqlangan' AND sp.package_type = 'qopli'
                   AND sp.quantity_available > 0 AND sp.claimed = 0
-            ORDER BY sp.price ASC
+            ORDER BY sp.created_at DESC, sp.id DESC
         """)
     rows = cur.fetchall()
     conn.close()
@@ -662,29 +662,29 @@ def find_direct_sellers_by_product(product_name, package_type=None):
 
 def get_available_farmer_loads(region=None):
     """Haydovchilar uchun: hali hech kim olmagan, tasdiqlangan fermer/sotuvchi yuklari.
-    Agar `region` berilsa, faqat shu viloyatdagi yuklar qaytariladi."""
+    Agar `region` berilsa, faqat shu viloyatdagi yuklar qaytariladi. Eng yangi e'lon birinchi."""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     if region:
         cur.execute("""
             SELECT sp.id, s.shop_name, s.phone, s.region, sp.product_name, sp.unit,
                    sp.price, sp.quantity_available, sp.pickup_address, sp.package_type, sp.photo_file_id,
-                   sp.description
+                   sp.description, sp.created_at
             FROM seller_products sp
             JOIN sellers s ON s.id = sp.seller_id
             WHERE s.status = 'tasdiqlangan' AND sp.quantity_available > 0 AND sp.claimed = 0
                   AND s.region = ?
-            ORDER BY sp.id DESC
+            ORDER BY sp.created_at DESC, sp.id DESC
         """, (region,))
     else:
         cur.execute("""
             SELECT sp.id, s.shop_name, s.phone, s.region, sp.product_name, sp.unit,
                    sp.price, sp.quantity_available, sp.pickup_address, sp.package_type, sp.photo_file_id,
-                   sp.description
+                   sp.description, sp.created_at
             FROM seller_products sp
             JOIN sellers s ON s.id = sp.seller_id
             WHERE s.status = 'tasdiqlangan' AND sp.quantity_available > 0 AND sp.claimed = 0
-            ORDER BY sp.id DESC
+            ORDER BY sp.created_at DESC, sp.id DESC
         """)
     rows = cur.fetchall()
     conn.close()
@@ -1655,7 +1655,7 @@ def add_combine_listing(owner_id, model, price_per_gektar, address, region, phot
 
 
 def get_active_combine_listings(region=None):
-    """Fermerlar uchun: barcha faol kombayn e'lonlari, eng arzonidan boshlab.
+    """Fermerlar uchun: barcha faol kombayn e'lonlari, eng yangisidan boshlab.
     Respublika bo'ylab xizmat ko'rsatuvchilar barcha hududlarda ko'rinadi,
     vodiy bo'ylab xizmat ko'rsatuvchilar esa faqat oz region so'ralganda yoki umumiy royxatda ko'rinadi."""
     conn = sqlite3.connect(DB_NAME)
@@ -1663,21 +1663,21 @@ def get_active_combine_listings(region=None):
     if region:
         cur.execute("""
             SELECT cl.id, cl.model, cl.price_per_gektar, cl.photo_file_id, cl.address, cl.region,
-                   co.full_name, co.phone, cl.coverage
+                   co.full_name, co.phone, cl.coverage, cl.created_at
             FROM combine_listings cl
             JOIN combine_owners co ON co.id = cl.owner_id
             WHERE cl.active = 1 AND co.status = 'tasdiqlangan'
                   AND (cl.region = ? OR cl.coverage = 'respublika')
-            ORDER BY cl.price_per_gektar ASC
+            ORDER BY cl.created_at DESC, cl.id DESC
         """, (region,))
     else:
         cur.execute("""
             SELECT cl.id, cl.model, cl.price_per_gektar, cl.photo_file_id, cl.address, cl.region,
-                   co.full_name, co.phone, cl.coverage
+                   co.full_name, co.phone, cl.coverage, cl.created_at
             FROM combine_listings cl
             JOIN combine_owners co ON co.id = cl.owner_id
             WHERE cl.active = 1 AND co.status = 'tasdiqlangan'
-            ORDER BY cl.price_per_gektar ASC
+            ORDER BY cl.created_at DESC, cl.id DESC
         """)
     rows = cur.fetchall()
     conn.close()
@@ -1729,29 +1729,29 @@ def add_combine_silos_listing(owner_id, price_per_kg, quantity_available, addres
 
 
 def get_active_combine_silos_listings(region=None):
-    """Mijozlar uchun: barcha faol kombayn-silos elonlari, eng arzonidan boshlab.
+    """Mijozlar uchun: barcha faol kombayn-silos elonlari, eng yangisidan boshlab.
     Agar `region` berilsa, faqat shu viloyatdagi elonlar qaytariladi."""
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
     if region:
         cur.execute("""
             SELECT csl.id, csl.price_per_kg, csl.quantity_available, csl.photo_file_id,
-                   csl.address, csl.region, co.id, co.full_name, co.phone, csl.description
+                   csl.address, csl.region, co.id, co.full_name, co.phone, csl.description, csl.created_at
             FROM combine_silos_listings csl
             JOIN combine_owners co ON co.id = csl.owner_id
             WHERE csl.active = 1 AND co.status = 'tasdiqlangan' AND csl.region = ?
                   AND (csl.quantity_available IS NULL OR csl.quantity_available > 0)
-            ORDER BY csl.price_per_kg ASC
+            ORDER BY csl.created_at DESC, csl.id DESC
         """, (region,))
     else:
         cur.execute("""
             SELECT csl.id, csl.price_per_kg, csl.quantity_available, csl.photo_file_id,
-                   csl.address, csl.region, co.id, co.full_name, co.phone, csl.description
+                   csl.address, csl.region, co.id, co.full_name, co.phone, csl.description, csl.created_at
             FROM combine_silos_listings csl
             JOIN combine_owners co ON co.id = csl.owner_id
             WHERE csl.active = 1 AND co.status = 'tasdiqlangan'
                   AND (csl.quantity_available IS NULL OR csl.quantity_available > 0)
-            ORDER BY csl.price_per_kg ASC
+            ORDER BY csl.created_at DESC, csl.id DESC
         """)
     rows = cur.fetchall()
     conn.close()
@@ -1821,7 +1821,7 @@ def add_driver_silos_listing(driver_id, price_per_kg, quantity_available, addres
 
 
 def get_active_driver_silos_listings(region=None):
-    """Mijozlar uchun: barcha faol haydovchi-silos elonlari, eng arzonidan boshlab.
+    """Mijozlar uchun: barcha faol haydovchi-silos elonlari, eng yangisidan boshlab.
     Qora ro'yxatdagi (5+ kun to'lanmagan qarzi bor) haydovchilarning elonlari bu ro'yxatga kirmaydi.
     Agar `region` berilsa, faqat shu viloyatdagi elonlar qaytariladi."""
     conn = sqlite3.connect(DB_NAME)
@@ -1829,22 +1829,22 @@ def get_active_driver_silos_listings(region=None):
     if region:
         cur.execute("""
             SELECT dsl.id, dsl.driver_id, dsl.price_per_kg, dsl.quantity_available, dsl.photo_file_id,
-                   dsl.address, dsl.region, d.full_name, d.phone, d.vehicle_number, dsl.description
+                   dsl.address, dsl.region, d.full_name, d.phone, d.vehicle_number, dsl.description, dsl.created_at
             FROM driver_silos_listings dsl
             JOIN drivers d ON d.id = dsl.driver_id
             WHERE dsl.active = 1 AND d.status = 'tasdiqlangan' AND dsl.region = ?
                   AND (dsl.quantity_available IS NULL OR dsl.quantity_available > 0)
-            ORDER BY dsl.price_per_kg ASC
+            ORDER BY dsl.created_at DESC, dsl.id DESC
         """, (region,))
     else:
         cur.execute("""
             SELECT dsl.id, dsl.driver_id, dsl.price_per_kg, dsl.quantity_available, dsl.photo_file_id,
-                   dsl.address, dsl.region, d.full_name, d.phone, d.vehicle_number, dsl.description
+                   dsl.address, dsl.region, d.full_name, d.phone, d.vehicle_number, dsl.description, dsl.created_at
             FROM driver_silos_listings dsl
             JOIN drivers d ON d.id = dsl.driver_id
             WHERE dsl.active = 1 AND d.status = 'tasdiqlangan'
                   AND (dsl.quantity_available IS NULL OR dsl.quantity_available > 0)
-            ORDER BY dsl.price_per_kg ASC
+            ORDER BY dsl.created_at DESC, dsl.id DESC
         """)
     rows = cur.fetchall()
     conn.close()
@@ -1944,9 +1944,22 @@ def deactivate_combine_silos_listing(listing_id):
 def cleanup_old_listings(days=2):
     """2 kundan eski, hali faol/band qilinmagan e'lonlarni avtomatik o'chiradi (deaktivatsiya qiladi).
     Tarixi bor (band qilingan/sotilgan) yozuvlarga tegilmaydi — faqat hali ochiq turgan e'lonlar."""
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M")
+    return _deactivate_listings_older_than(cutoff)
+
+
+def cleanup_listings_daily():
+    """Har yangi kun boshlanganda ishga tushadi: BUGUNGI kundan OLDIN yaratilgan barcha
+    faol/ochiq e'lonlarni deaktivatsiya qiladi (fermer, kombayn texnika, kombayn silos,
+    haydovchi silos) — maqsad: e'lonlar har kuni yangilanadi, eskisi avtomatik yo'qoladi.
+    Tarixi bor (band qilingan/sotilgan) yozuvlarga tegilmaydi."""
+    today_start = datetime.now().strftime("%Y-%m-%d 00:00")
+    return _deactivate_listings_older_than(today_start)
+
+
+def _deactivate_listings_older_than(cutoff):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M")
 
     cur.execute("""
         UPDATE seller_products SET quantity_available = 0
@@ -1975,3 +1988,60 @@ def cleanup_old_listings(days=2):
     conn.commit()
     conn.close()
     return {"seller_products": sp_count, "driver_silos": ds_count, "combine_tech": cl_count, "combine_silos": csl_count}
+
+
+# ----------------- Admin uchun AI hisobot statistikasi -----------------
+
+def get_weekly_stats(days=7):
+    """Admin uchun AI hisobot tayyorlashda ishlatiladigan xom statistika — oxirgi N kun."""
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M")
+
+    stats = {}
+
+    cur.execute("SELECT COUNT(*), COALESCE(SUM(total_price), 0) FROM orders WHERE created_at >= ?", (cutoff,))
+    stats["orders_count"], stats["orders_total_sum"] = cur.fetchone()
+
+    cur.execute("""
+        SELECT region, COUNT(*) FROM orders WHERE created_at >= ?
+        GROUP BY region ORDER BY COUNT(*) DESC LIMIT 5
+    """, (cutoff,))
+    stats["top_order_regions"] = cur.fetchall()
+
+    # sellers jadvalida created_at bolmasligi mumkin — xavfsiz tekshiruv
+    seller_cols = [c[1] for c in cur.execute("PRAGMA table_info(sellers)").fetchall()]
+    if "created_at" in seller_cols:
+        cur.execute("SELECT COUNT(*) FROM sellers WHERE created_at >= ?", (cutoff,))
+        stats["new_sellers"] = cur.fetchone()[0]
+    else:
+        stats["new_sellers"] = None
+
+    driver_cols = [c[1] for c in cur.execute("PRAGMA table_info(drivers)").fetchall()]
+    if "created_at" in driver_cols:
+        cur.execute("SELECT COUNT(*) FROM drivers WHERE created_at >= ?", (cutoff,))
+        stats["new_drivers"] = cur.fetchone()[0]
+    else:
+        stats["new_drivers"] = None
+
+    cur.execute("SELECT COUNT(*) FROM seller_products WHERE created_at >= ?", (cutoff,))
+    stats["new_seller_listings"] = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM driver_silos_listings WHERE created_at >= ?", (cutoff,))
+    stats["new_driver_silos_listings"] = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT s.region, AVG(sp.price) FROM seller_products sp
+        JOIN sellers s ON s.id = sp.seller_id
+        WHERE sp.created_at >= ? AND sp.package_type IN ('gektar', 'naval')
+        GROUP BY s.region ORDER BY AVG(sp.price) DESC
+    """, (cutoff,))
+    stats["avg_price_by_region"] = cur.fetchall()
+
+    cur.execute("""
+        SELECT COUNT(*) FROM driver_listings WHERE payment_confirmed = 0 AND created_at IS NOT NULL
+    """)
+    stats["unpaid_debts_count"] = cur.fetchone()[0]
+
+    conn.close()
+    return stats

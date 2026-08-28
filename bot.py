@@ -2836,7 +2836,15 @@ async def admin_ai_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text("⏳ Hisobot tayyorlanmoqda...")
-    stats = db.get_weekly_stats(days=7)
+    try:
+        stats = db.get_weekly_stats(days=7)
+    except Exception as e:
+        logger.error(f"Statistika yig'ishda xatolik: {e}")
+        await update.message.reply_text(
+            "Kechirasiz, statistikani yig'ishda xatolik yuz berdi. "
+            "database.py serverda eng so'nggi versiya ekanini tekshiring."
+        )
+        return
 
     if not ai_client:
         text = (
